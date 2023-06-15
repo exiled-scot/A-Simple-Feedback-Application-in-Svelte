@@ -1,6 +1,7 @@
 <script>
-        import HomePage from './components/HomePage.svelte';
+    import FeedbackPage from './components/FeedbackPage.svelte';
 </script>
-<main class="app-container">
-    <HomePage />
-</main>
+
+<div class="container">
+    <FeedbackPage />
+</div>

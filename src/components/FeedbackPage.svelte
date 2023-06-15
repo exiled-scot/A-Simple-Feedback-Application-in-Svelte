@@ -1,1 +1,10 @@
-<!-- Your code here -->
+<script>
+    import FeedbackForm from './FeedbackForm.svelte'
+    import FeedbackList from './FeedbackList.svelte'
+    import FeedbackStats from './FeedbackStats.svelte'
+</script>
+<main class="container">
+    <FeedbackForm />
+    <FeedbackStats />
+    <FeedbackList />
+</main>
