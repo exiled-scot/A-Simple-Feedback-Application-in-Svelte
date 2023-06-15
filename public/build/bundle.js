@@ -24,8 +24,31 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
+    let src_url_equal_anchor;
+    function src_url_equal(element_src, url) {
+        if (!src_url_equal_anchor) {
+            src_url_equal_anchor = document.createElement('a');
+        }
+        src_url_equal_anchor.href = url;
+        return element_src === src_url_equal_anchor.href;
+    }
     function is_empty(obj) {
         return Object.keys(obj).length === 0;
+    }
+    function validate_store(store, name) {
+        if (store != null && typeof store.subscribe !== 'function') {
+            throw new Error(`'${name}' is not a store with a 'subscribe' method`);
+        }
+    }
+    function subscribe(store, ...callbacks) {
+        if (store == null) {
+            return noop;
+        }
+        const unsub = store.subscribe(...callbacks);
+        return unsub.unsubscribe ? () => unsub.unsubscribe() : unsub;
+    }
+    function component_subscribe(component, store, callback) {
+        component.$$.on_destroy.push(subscribe(store, callback));
     }
     function append(target, node) {
         target.appendChild(node);
@@ -36,8 +59,24 @@ var app = (function () {
     function detach(node) {
         node.parentNode.removeChild(node);
     }
+    function destroy_each(iterations, detaching) {
+        for (let i = 0; i < iterations.length; i += 1) {
+            if (iterations[i])
+                iterations[i].d(detaching);
+        }
+    }
     function element(name) {
         return document.createElement(name);
+    }
+    function text(data) {
+        return document.createTextNode(data);
+    }
+    function space() {
+        return text(' ');
+    }
+    function listen(node, event, handler, options) {
+        node.addEventListener(event, handler, options);
+        return () => node.removeEventListener(event, handler, options);
     }
     function attr(node, attribute, value) {
         if (value == null)
@@ -123,11 +162,31 @@ var app = (function () {
         }
     }
     const outroing = new Set();
+    let outros;
     function transition_in(block, local) {
         if (block && block.i) {
             outroing.delete(block);
             block.i(local);
         }
+    }
+    function transition_out(block, local, detach, callback) {
+        if (block && block.o) {
+            if (outroing.has(block))
+                return;
+            outroing.add(block);
+            outros.c.push(() => {
+                outroing.delete(block);
+                if (callback) {
+                    if (detach)
+                        block.d(1);
+                    callback();
+                }
+            });
+            block.o(local);
+        }
+    }
+    function create_component(block) {
+        block && block.c();
     }
     function mount_component(component, target, anchor, customElement) {
         const { fragment, on_mount, on_destroy, after_update } = component.$$;
@@ -270,12 +329,41 @@ var app = (function () {
         dispatch_dev('SvelteDOMRemove', { node });
         detach(node);
     }
+    function listen_dev(node, event, handler, options, has_prevent_default, has_stop_propagation) {
+        const modifiers = options === true ? ['capture'] : options ? Array.from(Object.keys(options)) : [];
+        if (has_prevent_default)
+            modifiers.push('preventDefault');
+        if (has_stop_propagation)
+            modifiers.push('stopPropagation');
+        dispatch_dev('SvelteDOMAddEventListener', { node, event, handler, modifiers });
+        const dispose = listen(node, event, handler, options);
+        return () => {
+            dispatch_dev('SvelteDOMRemoveEventListener', { node, event, handler, modifiers });
+            dispose();
+        };
+    }
     function attr_dev(node, attribute, value) {
         attr(node, attribute, value);
         if (value == null)
             dispatch_dev('SvelteDOMRemoveAttribute', { node, attribute });
         else
             dispatch_dev('SvelteDOMSetAttribute', { node, attribute, value });
+    }
+    function set_data_dev(text, data) {
+        data = '' + data;
+        if (text.wholeText === data)
+            return;
+        dispatch_dev('SvelteDOMSetData', { node: text, data });
+        text.data = data;
+    }
+    function validate_each_argument(arg) {
+        if (typeof arg !== 'string' && !(arg && typeof arg === 'object' && 'length' in arg)) {
+            let msg = '{#each} only iterates over array-like objects.';
+            if (typeof Symbol === 'function' && arg && Symbol.iterator in arg) {
+                msg += ' You can use a spread to convert this iterable into an array.';
+            }
+            throw new Error(msg);
+        }
     }
     function validate_slots(name, slot, keys) {
         for (const slot_key of Object.keys(slot)) {
@@ -304,35 +392,424 @@ var app = (function () {
         $inject_state() { }
     }
 
-    /* src/App.svelte generated by Svelte v3.43.2 */
+    const subscriber_queue = [];
+    /**
+     * Create a `Writable` store that allows both updating and reading by subscription.
+     * @param {*=}value initial value
+     * @param {StartStopNotifier=}start start and stop notifications for subscriptions
+     */
+    function writable(value, start = noop) {
+        let stop;
+        const subscribers = new Set();
+        function set(new_value) {
+            if (safe_not_equal(value, new_value)) {
+                value = new_value;
+                if (stop) { // store is ready
+                    const run_queue = !subscriber_queue.length;
+                    for (const subscriber of subscribers) {
+                        subscriber[1]();
+                        subscriber_queue.push(subscriber, value);
+                    }
+                    if (run_queue) {
+                        for (let i = 0; i < subscriber_queue.length; i += 2) {
+                            subscriber_queue[i][0](subscriber_queue[i + 1]);
+                        }
+                        subscriber_queue.length = 0;
+                    }
+                }
+            }
+        }
+        function update(fn) {
+            set(fn(value));
+        }
+        function subscribe(run, invalidate = noop) {
+            const subscriber = [run, invalidate];
+            subscribers.add(subscriber);
+            if (subscribers.size === 1) {
+                stop = start(set) || noop;
+            }
+            run(value);
+            return () => {
+                subscribers.delete(subscriber);
+                if (subscribers.size === 0) {
+                    stop();
+                    stop = null;
+                }
+            };
+        }
+        return { set, update, subscribe };
+    }
 
-    const file = "src/App.svelte";
+    const courseId = writable(1);
+    const courses = writable([
+      {
+        id: 0,
+        name: "Database Design Fundamentals for Software Engineers",
+        feedbacks: [
+          {
+            id: 1,
+            rating: 7,
+            text: 'The course was good but I struggled in developing interest into the course. Adding more interactive elements will solve this problems',
+          },
+          {
+            id: 0,
+            rating: 10,
+            text: 'This was the best course I have taken so far. It gave me a very in depth knowledge the subject. Will recommend to others',
+          },
+          {
+            id: 2,
+            rating: 4,
+            text: 'It was no up the expectations.',
+          },
+        ],
+      },
+      {
+        id: 1,
+        name: "Grokking Modern System Design for Software Engineers & Managers",
+        feedbacks: [
+          {
+            id: 1,
+            rating: 7,
+            text: 'The course was good but I struggled in developing interest into the course. Adding more interactive elements will solve this problems',
+          },
+          {
+            id: 2,
+            rating: 4,
+            text: 'It was no up the expectations.',
+          },
+          {
+            id: 0,
+            rating: 10,
+            text: 'This was the best course I have taken so far. It gave me a very in depth knowledge the subject. Will recommend to others',
+          },
+        ],
+      },
+      {
+        id: 2,
+        name: "AI Project Management: Deploying and Maintaining AI for Business",
+        feedbacks: [
+          {
+            id: 2,
+            rating: 4,
+            text: 'It was no up the expectations.',
+          },
+          {
+            id: 0,
+            rating: 10,
+            text: 'This was the best course I have taken so far. It gave me a very in depth knowledge the subject. Will recommend to others',
+          },
+          {
+            id: 1,
+            rating: 7,
+            text: 'The course was good but I struggled in developing interest into the course. Adding more interactive elements will solve this problems',
+          },
+        ],
+      },
+      {
+        id: 3,
+        name: "Python 201 - Interactively Learn Advanced Concepts in Python 3",
+        feedbacks: [
+          {
+            id: 0,
+            rating: 9,
+            text: 'This was the best course I have taken so far. It gave me a very in depth knowledge the subject. Will recommend to others',
+          },
+          {
+            id: 1,
+            rating: 7,
+            text: 'The course was good but I struggled in developing interest into the course. Adding more interactive elements will solve this problems',
+          },
+          {
+            id: 2,
+            rating: 5,
+            text: 'It was no up the expectations.',
+          },
+        ],
+      },
+      {
+        id: 4,
+        name: "Operating Systems: Virtualization, Concurrency & Persistence",
+        feedbacks: [
+          {
+            id: 0,
+            rating: 10,
+            text: 'This was the best course I have taken so far. It gave me a very in depth knowledge the subject. Will recommend to others',
+          },
+          {
+            id: 1,
+            rating: 8,
+            text: 'The course was good but I struggled in developing interest into the course. Adding more interactive elements will solve this problems',
+          },
+          {
+            id: 2,
+            rating: 4,
+            text: 'It was no up the expectations.',
+          },
+        ],
+      },
+      {
+        id: 5,
+        name: "Java 8 for Experienced Developers: Lambdas, Stream API & Beyond",
+        feedbacks: [
+          {
+            id: 0,
+            rating: 10,
+            text: 'This was the best course I have taken so far. It gave me a very in depth knowledge the subject. Will recommend to others',
+          },
+          {
+            id: 2,
+            rating: 4,
+            text: 'It was no up the expectations.',
+          },
+          {
+            id: 1,
+            rating: 7,
+            text: 'The course was good but I struggled in developing interest into the course. Adding more interactive elements will solve this problems',
+          },
+        ],
+      },
+    ]);
 
-    function create_fragment(ctx) {
+    /* src/components/HomePage.svelte generated by Svelte v3.43.2 */
+    const file$1 = "src/components/HomePage.svelte";
+
+    function get_each_context(ctx, list, i) {
+    	const child_ctx = ctx.slice();
+    	child_ctx[1] = list[i];
+    	return child_ctx;
+    }
+
+    // (5:4) {#each $courses as course }
+    function create_each_block(ctx) {
+    	let div;
+    	let img;
+    	let img_src_value;
+    	let t0;
+    	let h3;
+    	let t1_value = /*course*/ ctx[1].name + "";
+    	let t1;
+    	let t2;
+    	let button;
+    	let t4;
+    	let mounted;
+    	let dispose;
+
+    	const block = {
+    		c: function create() {
+    			div = element("div");
+    			img = element("img");
+    			t0 = space();
+    			h3 = element("h3");
+    			t1 = text(t1_value);
+    			t2 = space();
+    			button = element("button");
+    			button.textContent = "Feedback";
+    			t4 = space();
+    			attr_dev(img, "class", "img");
+    			if (!src_url_equal(img.src, img_src_value = "img/image" + (/*course*/ ctx[1].id + 1) + ".jpg")) attr_dev(img, "src", img_src_value);
+    			attr_dev(img, "alt", "");
+    			add_location(img, file$1, 6, 12, 178);
+    			attr_dev(h3, "class", "name");
+    			add_location(h3, file$1, 7, 12, 248);
+    			attr_dev(button, "class", "button");
+    			add_location(button, file$1, 8, 12, 296);
+    			attr_dev(div, "class", "course-card");
+    			add_location(div, file$1, 5, 8, 140);
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, div, anchor);
+    			append_dev(div, img);
+    			append_dev(div, t0);
+    			append_dev(div, h3);
+    			append_dev(h3, t1);
+    			append_dev(div, t2);
+    			append_dev(div, button);
+    			append_dev(div, t4);
+
+    			if (!mounted) {
+    				dispose = listen_dev(
+    					button,
+    					"click",
+    					function () {
+    						if (is_function(courseId.set(/*course*/ ctx[1].id))) courseId.set(/*course*/ ctx[1].id).apply(this, arguments);
+    					},
+    					false,
+    					false,
+    					false
+    				);
+
+    				mounted = true;
+    			}
+    		},
+    		p: function update(new_ctx, dirty) {
+    			ctx = new_ctx;
+
+    			if (dirty & /*$courses*/ 1 && !src_url_equal(img.src, img_src_value = "img/image" + (/*course*/ ctx[1].id + 1) + ".jpg")) {
+    				attr_dev(img, "src", img_src_value);
+    			}
+
+    			if (dirty & /*$courses*/ 1 && t1_value !== (t1_value = /*course*/ ctx[1].name + "")) set_data_dev(t1, t1_value);
+    		},
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(div);
+    			mounted = false;
+    			dispose();
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_each_block.name,
+    		type: "each",
+    		source: "(5:4) {#each $courses as course }",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function create_fragment$1(ctx) {
     	let main;
-    	let h1;
+    	let each_value = /*$courses*/ ctx[0];
+    	validate_each_argument(each_value);
+    	let each_blocks = [];
+
+    	for (let i = 0; i < each_value.length; i += 1) {
+    		each_blocks[i] = create_each_block(get_each_context(ctx, each_value, i));
+    	}
 
     	const block = {
     		c: function create() {
     			main = element("main");
-    			h1 = element("h1");
-    			h1.textContent = "Hello";
-    			attr_dev(h1, "class", "svelte-v2gg4g");
-    			add_location(h1, file, 1, 1, 8);
-    			add_location(main, file, 0, 0, 0);
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].c();
+    			}
+
+    			attr_dev(main, "class", "home-container");
+    			add_location(main, file$1, 3, 0, 70);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, main, anchor);
-    			append_dev(main, h1);
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].m(main, null);
+    			}
     		},
-    		p: noop,
+    		p: function update(ctx, [dirty]) {
+    			if (dirty & /*courseId, $courses*/ 1) {
+    				each_value = /*$courses*/ ctx[0];
+    				validate_each_argument(each_value);
+    				let i;
+
+    				for (i = 0; i < each_value.length; i += 1) {
+    					const child_ctx = get_each_context(ctx, each_value, i);
+
+    					if (each_blocks[i]) {
+    						each_blocks[i].p(child_ctx, dirty);
+    					} else {
+    						each_blocks[i] = create_each_block(child_ctx);
+    						each_blocks[i].c();
+    						each_blocks[i].m(main, null);
+    					}
+    				}
+
+    				for (; i < each_blocks.length; i += 1) {
+    					each_blocks[i].d(1);
+    				}
+
+    				each_blocks.length = each_value.length;
+    			}
+    		},
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(main);
+    			destroy_each(each_blocks, detaching);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$1.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$1($$self, $$props, $$invalidate) {
+    	let $courses;
+    	validate_store(courses, 'courses');
+    	component_subscribe($$self, courses, $$value => $$invalidate(0, $courses = $$value));
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('HomePage', slots, []);
+    	const writable_props = [];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<HomePage> was created with unknown prop '${key}'`);
+    	});
+
+    	$$self.$capture_state = () => ({ courses, courseId, $courses });
+    	return [$courses];
+    }
+
+    class HomePage extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+    		init(this, options, instance$1, create_fragment$1, safe_not_equal, {});
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "HomePage",
+    			options,
+    			id: create_fragment$1.name
+    		});
+    	}
+    }
+
+    /* src/App.svelte generated by Svelte v3.43.2 */
+    const file = "src/App.svelte";
+
+    function create_fragment(ctx) {
+    	let main;
+    	let homepage;
+    	let current;
+    	homepage = new HomePage({ $$inline: true });
+
+    	const block = {
+    		c: function create() {
+    			main = element("main");
+    			create_component(homepage.$$.fragment);
+    			attr_dev(main, "class", "app-container");
+    			add_location(main, file, 3, 0, 80);
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, main, anchor);
+    			mount_component(homepage, main, null);
+    			current = true;
+    		},
+    		p: noop,
+    		i: function intro(local) {
+    			if (current) return;
+    			transition_in(homepage.$$.fragment, local);
+    			current = true;
+    		},
+    		o: function outro(local) {
+    			transition_out(homepage.$$.fragment, local);
+    			current = false;
+    		},
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(main);
+    			destroy_component(homepage);
     		}
     	};
 
@@ -347,7 +824,7 @@ var app = (function () {
     	return block;
     }
 
-    function instance($$self, $$props) {
+    function instance($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('App', slots, []);
     	const writable_props = [];
@@ -356,6 +833,7 @@ var app = (function () {
     		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<App> was created with unknown prop '${key}'`);
     	});
 
+    	$$self.$capture_state = () => ({ HomePage });
     	return [];
     }
 
