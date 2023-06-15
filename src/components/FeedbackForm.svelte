@@ -1,7 +1,8 @@
 <script>
   import {courses, courseId} from '../stores.js'
   import Rating from './Rating.svelte'
-
+  import { toast } from '@zerodevx/svelte-toast'
+  
   let text = ''
   let rating = 10
 
@@ -10,16 +11,22 @@
   const handleSelect = e => {rating = e.detail}
 
   const handleSubmit = () => {
-      const newFeedback = {
-        id: $courses[currentCourseId].feedbacks.length,
-        text,
-        rating: rating
+    const newFeedback = {
+      id: $courses[currentCourseId].feedbacks.length,
+      text,
+      rating: rating
+    }
+    courses.update((courseArray)=>{
+      courseArray[currentCourseId].feedbacks = [newFeedback,...$courses[currentCourseId].feedbacks]
+      return courseArray;
+    })
+    text = ''
+    toast.push('Thank you for the feedback!', {
+      theme: {
+        '--toastBackground': '#48BB78',
+        '--toastBarBackground': '#2F855A'
       }
-      courses.update((courseArray)=>{
-        courseArray[currentCourseId].feedbacks = [newFeedback,...$courses[currentCourseId].feedbacks]
-        return courseArray;
-      })
-      text = ''
+    })
   }
 </script>
 
